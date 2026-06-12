@@ -1,0 +1,21 @@
+# Core
+streamlit==1.35.0
+python-dotenv==1.0.1
+
+# LLM & AI Framework
+google-generativeai==0.7.2
+langchain==0.2.5
+langchain-google-genai==1.0.6
+langchain-community==0.2.5
+
+# Embeddings
+sentence-transformers==3.0.1
+
+# Vector Database
+faiss-cpu==1.8.0
+
+# PDF Processing
+pymupdf==1.24.5
+
+# Utilities
+numpy==1.26.4
