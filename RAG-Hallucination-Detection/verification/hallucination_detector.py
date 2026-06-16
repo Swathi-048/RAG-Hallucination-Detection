@@ -16,24 +16,25 @@ with the scores (that's trust_score.py and response_validator.py).
 """
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 from config import EMBEDDING_MODEL
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Reuse the module-level singleton from rag/embeddings.py if already loaded,
-# otherwise instantiate here (SentenceTransformer caches internally).
-_model: SentenceTransformer | None = None
+# Try to use SentenceTransformer if available; otherwise fall back to the
+# project's EmbeddingEngine which provides compatible embeddings.
+_HAS_SENTENCE = True
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception:
+    SentenceTransformer = None
+    _HAS_SENTENCE = False
 
-
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        logger.debug(f"Loading embedding model for hallucination detection: {EMBEDDING_MODEL}")
-        _model = SentenceTransformer(EMBEDDING_MODEL)
-    return _model
+_embedder = None
+if not _HAS_SENTENCE:
+    from rag.embeddings import EmbeddingEngine
+    _embedder = EmbeddingEngine()
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -71,16 +72,15 @@ def compute_similarities(answer: str, context_chunks: list[str]) -> dict:
         logger.warning("No context chunks passed to compute_similarities.")
         return {"per_chunk": [], "max": 0.0, "mean": 0.0, "min": 0.0}
 
-    model = _get_model()
-
-    # Encode and normalise
-    answer_emb  = model.encode(
-        [answer], normalize_embeddings=True, convert_to_numpy=True
-    )[0].astype("float32")
-
-    chunk_embs  = model.encode(
-        context_chunks, normalize_embeddings=True, convert_to_numpy=True
-    ).astype("float32")
+    # Encode and normalise. Use SentenceTransformer when available for
+    # performance/compatibility; otherwise use the EmbeddingEngine fallback.
+    if _HAS_SENTENCE:
+        model = SentenceTransformer(EMBEDDING_MODEL)
+        answer_emb = model.encode([answer], normalize_embeddings=True, convert_to_numpy=True)[0].astype("float32")
+        chunk_embs = model.encode(context_chunks, normalize_embeddings=True, convert_to_numpy=True).astype("float32")
+    else:
+        answer_emb = _embedder.encode_query(answer)[0].astype("float32")
+        chunk_embs = _embedder.encode_documents(context_chunks).astype("float32")
 
     per_chunk = [_cosine_similarity(answer_emb, c) for c in chunk_embs]
 

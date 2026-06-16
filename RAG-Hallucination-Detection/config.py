@@ -6,15 +6,17 @@ All tuneable parameters live here — never scattered across files.
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+DOTENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(DOTENV_PATH)
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
 GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
 
 # ── LLM Settings ─────────────────────────────────────────────────────────────
-GEMINI_MODEL: str       = "gemini-1.5-flash"
+GEMINI_MODEL: str       = "gemini-2.5-flash"
 GEMINI_TEMPERATURE: float = 0.2       # lower = more factual/deterministic
 GEMINI_MAX_TOKENS: int  = 1024
 

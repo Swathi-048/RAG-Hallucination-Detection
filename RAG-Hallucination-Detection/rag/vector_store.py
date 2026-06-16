@@ -10,11 +10,15 @@ Responsibilities:
 """
 
 import numpy as np
-import faiss
-
 from config import TOP_K, EMBEDDING_DIM
 from utils.logger import get_logger
 from utils.helpers import timeit
+
+_HAS_FAISS = True
+try:
+    import faiss
+except Exception:
+    _HAS_FAISS = False
 
 logger = get_logger(__name__)
 
@@ -31,7 +35,9 @@ class VectorStore:
     """
 
     def __init__(self):
-        self._index: faiss.Index | None = None
+        self._index = None
+        # If faiss is unavailable, we keep embeddings in memory
+        self._embeddings: np.ndarray | None = None
         self._chunks: list[str]         = []
 
     # ── Build ─────────────────────────────────────────────────────────────────
@@ -58,8 +64,14 @@ class VectorStore:
             )
 
         dim = embeddings.shape[1]
-        self._index  = faiss.IndexFlatIP(dim)   # cosine (vectors are normalised)
-        self._index.add(embeddings)
+        if _HAS_FAISS:
+            self._index = faiss.IndexFlatIP(dim)
+            self._index.add(embeddings)
+            self._embeddings = None
+        else:
+            # keep embeddings in memory for numpy-based search
+            self._index = None
+            self._embeddings = embeddings.copy()
         self._chunks = list(chunks)
 
         logger.info(
@@ -93,17 +105,28 @@ class VectorStore:
             raise RuntimeError("Vector store is empty. Call build() first.")
 
         k = min(top_k, len(self._chunks))
-        scores, indices = self._index.search(query_embedding, k)
-
         results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or idx >= len(self._chunks):
-                continue
-            results.append({
-                "chunk": self._chunks[idx],
-                "score": float(score),
-                "index": int(idx),
-            })
+        if _HAS_FAISS and self._index is not None:
+            scores, indices = self._index.search(query_embedding, k)
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < 0 or idx >= len(self._chunks):
+                    continue
+                results.append({
+                    "chunk": self._chunks[idx],
+                    "score": float(score),
+                    "index": int(idx),
+                })
+        else:
+            # numpy fallback: embeddings are L2-normalised so dot==cosine
+            q = query_embedding.reshape(-1)
+            sims = (self._embeddings @ q)
+            idxs = np.argsort(-sims)[:k]
+            for idx in idxs:
+                results.append({
+                    "chunk": self._chunks[int(idx)],
+                    "score": float(sims[int(idx)]),
+                    "index": int(idx),
+                })
 
         logger.debug(
             f"FAISS search returned {len(results)} results "
@@ -115,7 +138,7 @@ class VectorStore:
 
     @property
     def is_ready(self) -> bool:
-        return self._index is not None and len(self._chunks) > 0
+        return (self._index is not None or self._embeddings is not None) and len(self._chunks) > 0
 
     @property
     def chunk_count(self) -> int:

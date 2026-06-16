@@ -175,8 +175,13 @@ _init_state()
 
 def _get_pipeline() -> RAGPipeline:
     if st.session_state.pipeline is None:
-        st.session_state.pipeline  = RAGPipeline()
-        st.session_state.validator = ResponseValidator(st.session_state.pipeline)
+        try:
+            st.session_state.pipeline  = RAGPipeline()
+            st.session_state.validator = ResponseValidator(st.session_state.pipeline)
+        except EnvironmentError as e:
+            st.error(str(e))
+            logger.error(f"Pipeline initialization failed: {e}")
+            return None
     return st.session_state.pipeline
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -298,12 +303,16 @@ with st.sidebar:
             with st.spinner("Indexing document…"):
                 try:
                     pipeline = _get_pipeline()
-                    info = pipeline.ingest(uploaded.read(), filename=uploaded.name)
-                    st.session_state.doc_name    = info["filename"]
-                    st.session_state.chunk_count = info["chunks"]
-                    st.session_state.history     = []
-                    st.success(f"✅ Ready — {info['chunks']} chunks indexed")
-                    logger.info(f"Document ingested via UI: {info}")
+                    if pipeline is None:
+                        # _get_pipeline already displayed an error message
+                        st.error("Pipeline unavailable. Check API key and restart the app.")
+                    else:
+                        info = pipeline.ingest(uploaded.read(), filename=uploaded.name)
+                        st.session_state.doc_name    = info["filename"]
+                        st.session_state.chunk_count = info["chunks"]
+                        st.session_state.history     = []
+                        st.success(f"✅ Ready — {info['chunks']} chunks indexed")
+                        logger.info(f"Document ingested via UI: {info}")
                 except Exception as e:
                     st.error(f"Failed to process PDF: {e}")
                     logger.error(f"Ingest error: {e}")
@@ -382,6 +391,14 @@ question = st.text_input(
     label_visibility="collapsed",
 )
 
+mode = st.radio(
+    "Answer mode",
+    options=["Grounded only", "Open AI-style"],
+    help="Grounded only answers stay tied to the document; open mode may use broader knowledge.",
+    index=0,
+)
+allow_external = mode == "Open AI-style"
+
 ask_col, _ = st.columns([1, 5])
 with ask_col:
     ask = st.button(
@@ -409,7 +426,7 @@ if ask and question.strip() and pipeline_ready:
                 validator = st.session_state.validator
 
                 # 1. RAG answer
-                rag_result = pipeline.answer(question)
+                rag_result = pipeline.answer(question, allow_external_knowledge=allow_external)
 
                 # 2. Validate + possibly correct
                 verification = validator.validate(

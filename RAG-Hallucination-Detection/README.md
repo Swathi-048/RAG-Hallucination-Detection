@@ -167,6 +167,8 @@ cp .env.example .env
 # Open .env and replace: GOOGLE_API_KEY=your_actual_key_here
 ```
 
+> The app uses `gemini-2.5-flash` by default. If you want to switch models, update `GEMINI_MODEL` in `config.py`.
+
 ---
 
 ## Running the App

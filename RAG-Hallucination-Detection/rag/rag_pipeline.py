@@ -9,7 +9,12 @@ Orchestrates the full RAG pipeline:
 This module is the only place that talks to the Gemini API.
 """
 
-import google.generativeai as genai
+_HAS_GENAI = True
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+    _HAS_GENAI = False
 
 from config import (
     GOOGLE_API_KEY,
@@ -54,6 +59,18 @@ Question: {question}
 
 Grounded Answer:"""
 
+_OPEN_ANSWER_PROMPT = """\
+You are a helpful assistant. Use the provided context to support your answer.
+You may also use your general knowledge to answer the question if it is not fully covered by the document.
+If the question can be answered from the document, prefer that information.
+
+Context:
+{context}
+
+Question: {question}
+
+Answer:"""
+
 
 class RAGPipeline:
     """
@@ -67,20 +84,51 @@ class RAGPipeline:
     """
 
     def __init__(self):
-        if not validate_api_key(GOOGLE_API_KEY):
-            raise EnvironmentError(
-                "GOOGLE_API_KEY is missing or not set. "
-                "Copy .env.example → .env and add your key."
-            )
+        # If the official Google GenAI client is available, require an API key
+        # and configure the real Gemini model. Otherwise fall back to a
+        # deterministic mock LLM so the app remains usable offline.
+        if _HAS_GENAI:
+            if not validate_api_key(GOOGLE_API_KEY):
+                raise EnvironmentError(
+                    "GOOGLE_API_KEY is missing or not set. "
+                    "Copy .env.example → .env and add your key."
+                )
 
-        genai.configure(api_key=GOOGLE_API_KEY)
-        self._llm = genai.GenerativeModel(
-            GEMINI_MODEL,
-            generation_config=genai.GenerationConfig(
-                temperature=GEMINI_TEMPERATURE,
-                max_output_tokens=GEMINI_MAX_TOKENS,
-            ),
-        )
+            genai.configure(api_key=GOOGLE_API_KEY)
+            self._llm = genai.GenerativeModel(
+                GEMINI_MODEL,
+                generation_config=genai.GenerationConfig(
+                    temperature=GEMINI_TEMPERATURE,
+                    max_output_tokens=GEMINI_MAX_TOKENS,
+                ),
+            )
+            self._mock_llm = False
+        else:
+            logger.warning(
+                "google.generativeai not installed — running with a mock LLM. "
+                "Install the google-generativeai package and set GOOGLE_API_KEY "
+                "to enable Gemini integration."
+            )
+            # Simple mock LLM that returns a context-aware snippet
+            class _MockResponse:
+                def __init__(self, text: str):
+                    self.text = text
+
+            class _MockLLM:
+                def generate_content(self, prompt: str):
+                    # Attempt to extract the Context: section from the prompt
+                    marker = "Context:\n"
+                    if marker in prompt:
+                        ctx = prompt.split(marker, 1)[1]
+                        # Use the first 400 chars of the context as a mocked answer
+                        snippet = ctx.strip()[:400]
+                        if snippet:
+                            return _MockResponse(snippet + "\n\n(MOCKED LLM response — Gemini unavailable)")
+                    # Default fallback
+                    return _MockResponse("I could not find the answer in the provided document.")
+
+            self._llm = _MockLLM()
+            self._mock_llm = True
 
         self._loader    = PDFLoader()
         self._splitter  = TextSplitter()
@@ -145,7 +193,7 @@ class RAGPipeline:
     # ── Generation ────────────────────────────────────────────────────────────
 
     @timeit
-    def answer(self, question: str, top_k: int = TOP_K) -> dict:
+    def answer(self, question: str, top_k: int = TOP_K, allow_external_knowledge: bool = False) -> dict:
         """
         Full RAG answer: retrieve → generate.
 
@@ -161,7 +209,8 @@ class RAGPipeline:
         """
         retrieved = self.retrieve(question, top_k=top_k)
         context   = self._build_context(retrieved)
-        answer    = self._call_gemini(_ANSWER_PROMPT, question, context)
+        prompt    = _OPEN_ANSWER_PROMPT if allow_external_knowledge else _ANSWER_PROMPT
+        answer    = self._call_gemini(prompt, question, context)
 
         logger.info(f"Answer generated ({len(answer)} chars).")
         return {
@@ -201,8 +250,24 @@ class RAGPipeline:
         """Format prompt and call Gemini; return stripped text."""
         prompt = prompt_template.format(context=context, question=question)
         try:
-            response = self._llm.generate_content(prompt)
-            return response.text.strip()
+            response = self._llm.generate_content(
+                contents=prompt,
+                generation_config=genai.GenerationConfig(
+                    temperature=GEMINI_TEMPERATURE,
+                    max_output_tokens=GEMINI_MAX_TOKENS,
+                ),
+            )
+
+            # Response object may expose `_result` in this client version.
+            result = getattr(response, "_result", None)
+            if result is None:
+                raise RuntimeError("Gemini response missing _result payload")
+
+            candidates = getattr(result, "candidates", None)
+            if not candidates:
+                raise RuntimeError("Gemini response contained no candidates")
+
+            return candidates[0].content.parts[0].text.strip()
         except Exception as e:
             logger.error(f"Gemini API call failed: {e}")
             raise RuntimeError(f"LLM call failed: {e}") from e
